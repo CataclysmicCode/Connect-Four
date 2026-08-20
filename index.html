@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect 4 Solver with Opening Book</title>
+  <!-- Load Opening Book JS File -->
+  <script src="openingBookData.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #3b82f6;
+      --text: #f8fafc;
+      --pone: #ef4444;
+      --ptwo: #eab308;
+      --board: #1e3a8a;
+      --success: #22c55e;
+      --error: #f87171;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      max-width: 600px;
+      width: 100%;
+      background: var(--card);
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);
+    }
+    h1 { margin-top: 0; font-size: 1.5rem; text-align: center; }
+
+    .controls { display: flex; gap: 8px; margin-bottom: 20px; }
+    input[type="text"] {
+      flex: 1;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #fff;
+      font-size: 1rem;
+    }
+    button {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+      display: inline-block;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+    button:hover { opacity: 0.9; }
+
+    .board-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .scores-row {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      width: 100%;
+      max-width: 420px;
+      text-align: center;
+      font-weight: bold;
+      font-size: 0.9rem;
+    }
+    .score-cell {
+      padding: 6px 4px;
+      border-radius: 4px;
+      background: #0f172a;
+      margin: 0 2px;
+    }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      grid-template-rows: repeat(6, 1fr);
+      gap: 8px;
+      background: var(--board);
+      padding: 12px;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 420px;
+      aspect-ratio: 7 / 6;
+      box-sizing: border-box;
+    }
+    .cell {
+      background: var(--bg);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    .cell.p1 { background: var(--pone); }
+    .cell.p2 { background: var(--ptwo); }
+    .stats {
+      margin-top: 16px;
+      font-size: 0.875rem;
+      color: #94a3b8;
+      line-height: 1.5;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Connect 4 Solver</h1>
+
+  <div class="controls">
+    <input type="text" id="seqInput" placeholder="Move sequence (e.g. 4443535)" />
+    <button onclick="analyzeInput()">Analyze</button>
+    <button onclick="resetGame()" style="background:#64748b;">Reset</button>
+  </div>
+
+  <div class="board-container">
+    <div class="scores-row" id="scoresRow">
+      <div class="score-cell">-</div><div class="score-cell">-</div>
+      <div class="score-cell">-</div><div class="score-cell">-</div>
+      <div class="score-cell">-</div><div class="score-cell">-</div>
+      <div class="score-cell">-</div>
+    </div>
+    <div class="board" id="board"></div>
+  </div>
+
+  <div class="stats" id="stats">
+    Ready. Open <b>F12 Developer Console</b> to view real-time engine logs.
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// Worker Engine Code String
+// ============================================================================
+const workerCode = `
+class Position {
+  static WIDTH = 7;
+  static HEIGHT = 6;
+  static MIN_SCORE = Math.trunc(-42 / 2) + 3;
+  static MAX_SCORE = Math.trunc(43 / 2) - 3;
+
+  static BOTTOM_MASK = 0b0000001_0000001_0000001_0000001_0000001_0000001_0000001n;
+  static BOARD_MASK = Position.BOTTOM_MASK * ((1n << 6n) - 1n);
+
+  constructor(copyFrom) {
+    if (copyFrom) {
+      this.current_position = copyFrom.current_position;
+      this.mask = copyFrom.mask;
+      this.moves = copyFrom.moves;
+    } else {
+      this.current_position = 0n;
+      this.mask = 0n;
+      this.moves = 0;
+    }
+  }
+
+  static top_mask_col(col) { return 1n << BigInt(5 + col * 7); }
+  static bottom_mask_col(col) { return 1n << BigInt(col * 7); }
+  static column_mask(col) { return ((1n << 6n) - 1n) << BigInt(col * 7); }
+
+  static popcount(m) {
+    let c = 0;
+    while (m !== 0n) { m &= m - 1n; c++; }
+    return c;
+  }
+
+  canPlay(col) { return (this.mask & Position.top_mask_col(col)) === 0n; }
+
+  play(move) {
+    this.current_position ^= this.mask;
+    this.mask |= move;
+    this.moves++;
+  }
+
+  playCol(col) {
+    this.play((this.mask + Position.bottom_mask_col(col)) & Position.column_mask(col));
+  }
+
+  playSeq(seq) {
+    for (let i = 0; i < seq.length; i++) {
+      let col = seq.charCodeAt(i) - 49;
+      if (col < 0 || col >= Position.WIDTH || !this.canPlay(col) || this.isWinningMove(col)) return i;
+      this.playCol(col);
+    }
+    return seq.length;
+  }
+
+  nbMoves() { return this.moves; }
+  key() { return this.current_position + this.mask; }
+
+  partialKey3(key, col) {
+    let pos = 1n << BigInt(col * 7);
+    while ((pos & this.mask) !== 0n) {
+      key = key * 3n;
+      if ((pos & this.current_position) !== 0n) key += 1n;
+      else key += 2n;
+      pos <<= 1n;
+    }
+    key = key * 3n;
+    return key;
+  }
+
+  key3() {
+    let key_forward = 0n;
+    for (let i = 0; i < 7; i++) key_forward = this.partialKey3(key_forward, i);
+
+    let key_reverse = 0n;
+    for (let i = 6; i >= 0; i--) key_reverse = this.partialKey3(key_reverse, i);
+
+    let minKey = key_forward < key_reverse ? key_forward : key_reverse;
+    return minKey / 3n;
+  }
+
+  canWinNext() { return (this.winning_position() & this.possible()) !== 0n; }
+
+  isWinningMove(col) {
+    return (this.winning_position() & this.possible() & Position.column_mask(col)) !== 0n;
+  }
+
+  possible() { return (this.mask + Position.BOTTOM_MASK) & Position.BOARD_MASK; }
+
+  winning_position() { return Position.compute_winning_position(this.current_position, this.mask); }
+  opponent_winning_position() { return Position.compute_winning_position(this.current_position ^ this.mask, this.mask); }
+
+  possibleNonLosingMoves() {
+    let possible_mask = this.possible();
+    let opponent_win = this.opponent_winning_position();
+    let forced_moves = possible_mask & opponent_win;
+
+    if (forced_moves !== 0n) {
+      if ((forced_moves & (forced_moves - 1n)) !== 0n) return 0n;
+      else possible_mask = forced_moves;
+    }
+    return possible_mask & ~(opponent_win >> 1n);
+  }
+
+  moveScore(move) {
+    return Position.popcount(Position.compute_winning_position(this.current_position | move, this.mask));
+  }
+
+  static compute_winning_position(position, mask) {
+    let r = (position << 1n) & (position << 2n) & (position << 3n);
+    let p = (position << 7n) & (position << 14n);
+    r |= p & (position << 21n); r |= p & (position >> 7n);
+    p = (position >> 7n) & (position >> 14n);
+    r |= p & (position << 7n); r |= p & (position >> 21n);
+
+    p = (position << 6n) & (position << 12n);
+    r |= p & (position << 18n); r |= p & (position >> 6n);
+    p = (position >> 6n) & (position >> 12n);
+    r |= p & (position << 6n); r |= p & (position >> 18n);
+
+    p = (position << 8n) & (position << 16n);
+    r |= p & (position << 24n); r |= p & (position >> 8n);
+    p = (position >> 8n) & (position >> 16n);
+    r |= p & (position << 8n); r |= p & (position >> 24n);
+
+    return r & (Position.BOARD_MASK ^ mask);
+  }
+}
+
+class OpeningBook {
+  constructor() {
+    this.size = 0;
+    this.K = null;
+    this.V = null;
+    this.depth = -1;
+    this.keyByteSize = 0;
+    this.isLoaded = false;
+  }
+
+  loadData(data) {
+    try {
+      if (!data || !data.K || !data.V) {
+        return { success: false, reason: "Invalid JavaScript book data." };
+      }
+
+      this.depth = data.depth;
+      this.keyByteSize = data.keyByteSize;
+      this.size = data.size;
+
+      if (this.keyByteSize === 4) {
+        this.K = new Uint32Array(data.K);
+      } else if (this.keyByteSize === 2) {
+        this.K = new Uint16Array(data.K);
+      } else if (this.keyByteSize === 1) {
+        this.K = new Uint8Array(data.K);
+      } else {
+        return { success: false, reason: "Unsupported key size" };
+      }
+
+      this.V = new Uint8Array(data.V);
+      this.isLoaded = true;
+      return { success: true, entries: this.size };
+    } catch (e) {
+      return { success: false, reason: e.message };
+    }
+  }
+
+  get(P) {
+    if (!this.isLoaded || P.nbMoves() > this.depth) return 0;
+
+    const key3 = P.key3();
+    const pos = Number(key3 % BigInt(this.size));
+
+    let storedKey = this.K[pos];
+    let partialKey;
+
+    if (this.keyByteSize === 4) {
+      partialKey = Number(key3 & 0xFFFFFFFFn);
+    } else if (this.keyByteSize === 2) {
+      partialKey = Number(key3 & 0xFFFFn);
+    } else if (this.keyByteSize === 1) {
+      partialKey = Number(key3 & 0xFFn);
+    }
+
+    if (storedKey === partialKey) {
+      return this.V[pos];
+    }
+
+    return 0;
+  }
+}
+
+class MoveSorter {
+  constructor() {
+    this.entries = new Array(Position.WIDTH).fill(null).map(() => ({ move: 0n, score: 0 }));
+    this.size = 0;
+  }
+  reset() { this.size = 0; }
+  add(move, score) {
+    let pos = this.size++;
+    while (pos > 0 && this.entries[pos - 1].score > score) {
+      this.entries[pos].move = this.entries[pos - 1].move;
+      this.entries[pos].score = this.entries[pos - 1].score;
+      pos--;
+    }
+    this.entries[pos].move = move;
+    this.entries[pos].score = score;
+  }
+  getNext() { return this.size > 0 ? this.entries[--this.size].move : 0n; }
+}
+
+class TranspositionTable {
+  constructor() {
+    this.size = 2097169;
+    this.K = new BigUint64Array(this.size);
+    this.V = new Uint8Array(this.size);
+  }
+  reset() { this.K.fill(0n); this.V.fill(0); }
+  put(key, val) {
+    let pos = Number(key % BigInt(this.size));
+    this.K[pos] = key;
+    this.V[pos] = val;
+  }
+  get(key) {
+    let pos = Number(key % BigInt(this.size));
+    return this.K[pos] === key ? this.V[pos] : 0;
+  }
+}
+
+class Solver {
+  static INVALID_MOVE = -1000;
+  constructor() {
+    this.nodeCount = 0;
+    this.transTable = new TranspositionTable();
+    this.book = new OpeningBook();
+    this.columnOrder = new Int32Array(Position.WIDTH);
+    for (let i = 0; i < Position.WIDTH; i++) {
+      this.columnOrder[i] = Math.trunc(Position.WIDTH / 2) + Math.trunc((1 - 2 * (i % 2)) * Math.trunc((i + 1) / 2));
+    }
+  }
+
+  reset() {
+    this.nodeCount = 0;
+    this.transTable.reset();
+  }
+
+  loadBookData(data) {
+    return this.book.loadData(data);
+  }
+
+  negamax(P, alpha, beta) {
+    this.nodeCount++;
+
+    if (this.nodeCount % 250000 === 0) {
+      console.log(\`  %c[Thinking...] Explored \${this.nodeCount.toLocaleString()} nodes so far...\`, 'color: #94a3b8; font-style: italic;');
+    }
+
+    let possible = P.possibleNonLosingMoves();
+    if (possible === 0n) return -Math.trunc((42 - P.nbMoves()) / 2);
+    if (P.nbMoves() >= 40) return 0;
+
+    let min = -Math.trunc((40 - P.nbMoves()) / 2);
+    if (alpha < min) { alpha = min; if (alpha >= beta) return alpha; }
+
+    let max = Math.trunc((41 - P.nbMoves()) / 2);
+    if (beta > max) { beta = max; if (alpha >= beta) return beta; }
+
+    const key = P.key();
+    let val = this.transTable.get(key);
+    if (val !== 0) {
+      if (val > Position.MAX_SCORE - Position.MIN_SCORE + 1) {
+        min = val + 2 * Position.MIN_SCORE - Position.MAX_SCORE - 2;
+        if (alpha < min) { alpha = min; if (alpha >= beta) return alpha; }
+      } else {
+        max = val + Position.MIN_SCORE - 1;
+        if (beta > max) { beta = max; if (alpha >= beta) return beta; }
+      }
+    }
+
+    if (this.book.isLoaded) {
+      let bookVal = this.book.get(P);
+      if (bookVal !== 0) {
+        console.log(\`  %c[Book Hit!] Position found in JS opening book!\`, "color: #22c55e; font-weight: bold;");
+        return bookVal + Position.MIN_SCORE - 1;
+      }
+    }
+
+    let moves = new MoveSorter();
+    for (let i = Position.WIDTH - 1; i >= 0; i--) {
+      let move = possible & Position.column_mask(this.columnOrder[i]);
+      if (move !== 0n) moves.add(move, P.moveScore(move));
+    }
+
+    let next;
+    while ((next = moves.getNext()) !== 0n) {
+      let P2 = new Position(P);
+      P2.play(next);
+      let score = -this.negamax(P2, -beta, -alpha);
+
+      if (score >= beta) {
+        this.transTable.put(key, score + Position.MAX_SCORE - 2 * Position.MIN_SCORE + 2);
+        return score;
+      }
+      if (score > alpha) alpha = score;
+    }
+
+    this.transTable.put(key, alpha - Position.MIN_SCORE + 1);
+    return alpha;
+  }
+
+  solve(P, weak = false) {
+    if (P.canWinNext()) return Math.trunc((43 - P.nbMoves()) / 2);
+
+    let min = -Math.trunc((42 - P.nbMoves()) / 2);
+    let max = Math.trunc((43 - P.nbMoves()) / 2);
+    if (weak) { min = -1; max = 1; }
+
+    while (min < max) {
+      let med = min + Math.trunc((max - min) / 2);
+      if (med <= 0 && Math.trunc(min / 2) < med) med = Math.trunc(min / 2);
+      else if (med >= 0 && Math.trunc(max / 2) > med) med = Math.trunc(max / 2);
+
+      let r = this.negamax(P, med, med + 1);
+      if (r <= med) max = r;
+      else min = r;
+    }
+    return min;
+  }
+
+  analyze(P, weak = false) {
+    let scores = new Array(Position.WIDTH).fill(Solver.INVALID_MOVE);
+    let player = (P.nbMoves() % 2 === 0) ? "Player 1 (Red)" : "Player 2 (Yellow)";
+    console.log(\`%c[Connect4 Engine] Analyzing position for \${player} after move \${P.nbMoves()}...\`, "color: #3b82f6; font-weight: bold; font-size: 1.1em;");
+
+    for (let col = 0; col < Position.WIDTH; col++) {
+      if (P.canPlay(col)) {
+        let colNum = col + 1;
+        if (P.isWinningMove(col)) {
+          let score = Math.trunc((43 - P.nbMoves()) / 2);
+          scores[col] = score;
+          console.log(\`  %cCol \${colNum}: Direct Winning Move found! (Score: +\${score})\`, "color: #4ade80; font-weight: bold;");
+        } else {
+          console.log(\`  %cCol \${colNum}: Exploring move...\`, "color: #cbd5e1;");
+          let P2 = new Position(P);
+          P2.playCol(col);
+          let nodesBefore = this.nodeCount;
+          scores[col] = -this.solve(P2, weak);
+          let nodesSpent = this.nodeCount - nodesBefore;
+
+          let scoreStr = scores[col] > 0 ? \`+\${scores[col]}\` : \`\${scores[col]}\`;
+          let color = scores[col] > 0 ? "#4ade80" : scores[col] < 0 ? "#f87171" : "#fbbf24";
+          console.log(\`  %cCol \${colNum}: Score = \${scoreStr} | Explored \${nodesSpent.toLocaleString()} nodes\`, \`color: \${color}; font-weight: bold;\`);
+        }
+      } else {
+        console.log(\`  %cCol \${col + 1}: Unplayable (Column Full)\`, "color: #64748b;");
+      }
+    }
+    return scores;
+  }
+}
+
+const solver = new Solver();
+self.onmessage = function(e) {
+  try {
+    const { type, bookData, seq } = e.data;
+
+    if (type === 'LOAD_BOOK') {
+      let res = solver.loadBookData(bookData);
+      self.postMessage({
+        type: 'BOOK_LOADED',
+        success: res.success,
+        entries: res.entries || 0,
+        reason: res.reason || ""
+      });
+      return;
+    }
+
+    if (type === 'ANALYZE') {
+      const P = new Position();
+      P.playSeq(seq);
+      solver.reset();
+      const startTime = performance.now();
+      const scores = solver.analyze(P);
+      const endTime = performance.now();
+
+      console.log(\`%c[Engine Complete] Total nodes: \${solver.nodeCount.toLocaleString()} | Time: \${(endTime - startTime).toFixed(1)}ms\n\`, "color: #3b82f6; font-weight: bold;");
+
+      self.postMessage({
+        type: 'RESULT',
+        scores,
+        nodeCount: solver.nodeCount,
+        time: endTime - startTime
+      });
+    }
+  } catch (err) {
+    console.error("[Worker Error]", err);
+    self.postMessage({ type: 'WORKER_ERROR', error: err.message });
+  }
+};
+`;
+
+// Create Web Worker Blob URL
+const blob = new Blob([workerCode], { type: 'application/javascript' });
+const workerUrl = URL.createObjectURL(blob);
+let currentWorker = null;
+let currentMoves = "";
+
+function createWorker() {
+  if (currentWorker) currentWorker.terminate();
+  currentWorker = new Worker(workerUrl);
+
+  // Send OPENING_BOOK_DATA to worker if loaded
+  if (typeof OPENING_BOOK_DATA !== 'undefined') {
+    currentWorker.postMessage({ type: 'LOAD_BOOK', bookData: OPENING_BOOK_DATA });
+  }
+
+  currentWorker.onmessage = function(e) {
+    const data = e.data;
+
+    if (data.type === 'BOOK_LOADED') {
+      if (data.success) {
+        console.log(`[Opening Book] JS Book initialized with ${data.entries.toLocaleString()} entries.`);
+      } else {
+        console.error(`[Opening Book Error] ${data.reason}`);
+      }
+      return;
+    }
+
+    if (data.type === 'RESULT') {
+      const { scores, nodeCount, time } = data;
+      for (let col = 0; col < 7; col++) {
+        let cell = document.getElementById("scoresRow").children[col];
+        if (scores[col] === -1000) {
+          cell.innerText = "-";
+          cell.style.color = "#64748b";
+        } else {
+          cell.innerText = scores[col] > 0 ? `+${scores[col]}` : scores[col];
+          cell.style.color = scores[col] > 0 ? "#4ade80" : scores[col] < 0 ? "#f87171" : "#fbbf24";
+        }
+      }
+      document.getElementById("stats").innerText = 
+        `Nodes explored: ${nodeCount.toLocaleString()} | Time: ${time.toFixed(1)}ms`;
+    }
+
+    if (data.type === 'WORKER_ERROR') {
+      console.error("Worker error:", data.error);
+    }
+  };
+}
+
+// ============================================================================
+// UI Handling
+// ============================================================================
+function initBoard() {
+  const boardEl = document.getElementById("board");
+  boardEl.innerHTML = "";
+  for (let row = 5; row >= 0; row--) {
+    for (let col = 0; col < 7; col++) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.id = `cell-${col}-${row}`;
+      cell.onclick = () => handleColClick(col);
+      boardEl.appendChild(cell);
+    }
+  }
+}
+
+function updateBoardUI(P) {
+  for (let row = 0; row < 6; row++) {
+    for (let col = 0; col < 7; col++) {
+      document.getElementById(`cell-${col}-${row}`).className = "cell";
+    }
+  }
+
+  let mask = P.mask;
+  let curr = P.current_position;
+  let p1Turn = P.nbMoves() % 2 === 0;
+
+  for (let col = 0; col < 7; col++) {
+    let row = 0;
+    for (let b = col * 7; b < col * 7 + 6; b++) {
+      let bit = 1n << BigInt(b);
+      if ((mask & bit) !== 0n) {
+        const cell = document.getElementById(`cell-${col}-${row}`);
+        let isCurrentPlayer = (curr & bit) !== 0n;
+        cell.classList.add((p1Turn ? isCurrentPlayer : !isCurrentPlayer) ? "p1" : "p2");
+        row++;
+      } else {
+        break;
+      }
+    }
+  }
+}
+
+function handleColClick(col) {
+  let P = new PositionHelper();
+  P.playSeq(currentMoves);
+  if (P.canPlay(col)) {
+    currentMoves += (col + 1).toString();
+    document.getElementById("seqInput").value = currentMoves;
+    runSolver();
+  }
+}
+
+function analyzeInput() {
+  currentMoves = document.getElementById("seqInput").value.trim();
+  runSolver();
+}
+
+function resetGame() {
+  currentMoves = "";
+  document.getElementById("seqInput").value = "";
+  runSolver();
+}
+
+function runSolver() {
+  createWorker();
+
+  let P = new PositionHelper();
+  let processed = P.playSeq(currentMoves);
+  if (processed < currentMoves.length) {
+    currentMoves = currentMoves.substring(0, processed);
+    document.getElementById("seqInput").value = currentMoves;
+  }
+
+  updateBoardUI(P);
+
+  for (let col = 0; col < 7; col++) {
+    let cell = document.getElementById("scoresRow").children[col];
+    cell.innerText = "...";
+    cell.style.color = "#94a3b8";
+  }
+  document.getElementById("stats").innerText = "Analyzing in background thread... (Check F12 console for logs)";
+
+  currentWorker.postMessage({ type: 'ANALYZE', seq: currentMoves });
+}
+
+class PositionHelper {
+  constructor() { this.mask = 0n; this.current_position = 0n; this.moves = 0; }
+  canPlay(col) { return (this.mask & (1n << BigInt(5 + col * 7))) === 0n; }
+  playCol(col) {
+    let move = (this.mask + (1n << BigInt(col * 7))) & (((1n << 6n) - 1n) << BigInt(col * 7));
+    this.current_position ^= this.mask;
+    this.mask |= move;
+    this.moves++;
+  }
+  playSeq(seq) {
+    for (let i = 0; i < seq.length; i++) {
+      let col = seq.charCodeAt(i) - 49;
+      if (col < 0 || col >= 7 || !this.canPlay(col)) return i;
+      this.playCol(col);
+    }
+    return seq.length;
+  }
+  nbMoves() { return this.moves; }
+}
+
+initBoard();
+runSolver();
+</script>
+</body>
+</html>
